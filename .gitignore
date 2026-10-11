@@ -1,0 +1,10 @@
+public_data/videos/**/*.mp4
+
+
+
+
+__pycache__/
+*.pyc
+*.egg-info/
+user/models/trt_cache/
+out_check_solution/
