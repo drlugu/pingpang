@@ -17,6 +17,7 @@ participant/
     ├── tune.py            用缓存的逐帧观测做网格搜索
     ├── replay.py          从缓存观测**重放生产代码**的落点链路（秒级出分）
     ├── calib_offset.py    标定"输出通道 ↔ 帧偏移"
+    ├── run_local.sh       本地一键复跑（绕开 run.sh 的平台路径；--check 只跑 1 条）
     └── test_landing.py    落点算法冒烟测试（只需 numpy，含断口鲁棒性用例）
 ```
 
@@ -71,8 +72,9 @@ participant/
 # 平台/评测机：单任务端到端（GPU 解码 + TRT 优先，自动回退 onnxruntime）
 ./run.sh <input_dir> <output_dir>
 
-# 本地自检（跑 1 条视频，校验输出合法性）
-python3 scripts/check_solution.py --input public_data --solution participant.solution:Solution
+# 本地（无 GPU / 无 torch / 无 conda_env）：一条命令跑全量 + 评分
+bash participant/dev/run_local.sh            # 全量 15 条，CPU ≈ 13 分钟
+bash participant/dev/run_local.sh --check    # 只跑 1 条小视频自检（≈ 40 秒）
 
 # 本地评分（复刻官方口径）
 python3 participant/dev/eval_f1.py --predictions <output_dir>/predictions.jsonl
@@ -80,6 +82,20 @@ python3 participant/dev/eval_f1.py --predictions <output_dir>/predictions.jsonl
 # 落点算法冒烟测试（不需要模型/视频/GPU）
 python3 participant/dev/test_landing.py
 ```
+
+> **本地 `./run.sh` 跑不了是正常的，不是方案问题。** 官方入口是给评测镜像写的，
+> 里面写死了平台布局：`PY=/opt/conda/envs/conda_env/bin/python3`、
+> `"$PY" /participant/pingpang/integrity.py --verify`、`exec ... /participant/pingpang/run.py`、
+> `INPUT=${1:-/participant/input}`、`DECODER=${DECODER:-gpu}`。
+> 本机没有 `/participant/...`（也没有 `/opt/conda/envs/conda_env`、没有 torch/tensorrt/GPU），
+> 所以脚本在第 17 行 `integrity.py` 处就因 `set -e` 退出（**退出码 2**，报
+> `can't open file '/participant/pingpang/integrity.py'`）。
+> `run.py` 本身与平台路径无关（只 `sys.path.insert` 自身目录、`--input/--output` 为必填参数），
+> 直接调用即可；本地唯一必须改的是 `--decoder cpu`（走 `weights/ball.onnx` + onnxruntime）。
+> `dev/run_local.sh` 就是把这条命令固化下来。
+> 若想让官方 `./run.sh` 也跑通：`sudo mkdir -p /participant && sudo ln -sfn "$PWD" /participant/pingpang
+> && sudo ln -sfn "$PWD/public_data" /participant/input && sudo mkdir -p /participant/output
+> && DECODER=cpu ./run.sh /participant/input /participant/output`（`integrity.py --verify` 本地实测可通过）。
 
 调参闭环（在任意只有 numpy 的机器上即可完成，不需要 GPU）：
 
