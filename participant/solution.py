@@ -29,7 +29,8 @@ from core.types import Landing, RunContext, VideoMeta
 
 from .ball_detector import IN_H, IN_W, BallDetector
 from .base_solution import BaseSolution
-from .landing import clean_track, find_landings, fuse_obs
+from .landing import (clean_track, find_landings, fuse_obs, keep_in_roi,
+                      table_roi)
 
 _HERE = Path(__file__).resolve().parent
 
@@ -199,6 +200,12 @@ class Solution(BaseSolution):
                              max_gap=int(cfg.get("max_gap", 6)))
 
         raw = find_landings(points, cfg)
+
+        # 球台投影区门控：触台只可能发生在台面上。台外的"折角"是球已离台后在地面/
+        # 挡板上的真实反弹，Δv_y 信号与台内触台完全一致，只能靠落点位置判掉。
+        # ROI 是归一化机位常量（见 landing.table_roi / keep_in_roi 的 fail-open）。
+        raw = keep_in_roi(raw, table_roi(cfg.get("roi"), self.width, self.height),
+                          min_keep=float(cfg.get("roi_min_keep", 0.5)))
 
         out: list[Landing] = []
         for fid, x, y, _score in raw:

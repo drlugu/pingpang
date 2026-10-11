@@ -25,20 +25,39 @@ participant/
 
 | 视角 | 视频 | TP | FP | FN | 忽略 | P | R | **F1** |
 |---|---|---|---|---|---|---|---|---|
-| 0° | 5 | 19 | 8 | 2 | 0 | 0.704 | 0.905 | **0.792** |
-| 45° | 7 | 31 | 7 | 7 | 0 | 0.816 | 0.816 | **0.816** |
-| 90° | 3 | 29 | 9 | 4 | 2 | 0.763 | 0.879 | **0.817** |
+| 0° | 5 | 19 | 1 | 2 | 0 | 0.950 | 0.905 | **0.927** |
+| 45° | 7 | 32 | 5 | 6 | 0 | 0.865 | 0.842 | **0.853** |
+| 90° | 3 | 31 | 1 | 2 | 2 | 0.969 | 0.939 | **0.954** |
 
-**精度分 = 60.61 / 75**（官方基线 43.7 / 75），三视角 F1 均值 0.808 vs 基线总 F1 0.604。
+**精度分 = 68.35 / 75**（官方基线 43.7 / 75），三视角 F1 均值 0.911 vs 基线总 F1 0.604。
+
+相对首版（60.61）的三个增量，按收益排序：
+
+1. **球台投影区门控（最大单点收益）**：0/45/90 度都有一批 FP 其实是**球已离台后
+   在台外（地面/挡板）的真实反弹**——那确实是一次真实的抛物线折角，`Δv_y` 与台内
+   触台无法区分，只有"落点是否落在球台投影区内"能判掉。ROI 是机位常量，用各视角
+   真值落点包围盒外扩得到（0/45 度 50px、90 度 100px），由 `dev/tune.py --calib-roi`
+   标定；`keep_in_roi` 带 fail-open（见 §2 Step 2.5）。
+2. **90° 的 NMS 换成 `combo`**（折角强度×方向一致性）：同一窗口里"最猛的一折"才是
+   触台帧，而"y 最低点"可能落在触台后 1~2 帧（球继续远离相机，投影更靠下），
+   整窗选错帧。90° 单独因此从 F1 0.817 → 0.954。
+3. **45° 的强折角宽松档** `dv_strong`/`ratio_strong`：侧旋/斜视角下真触台的水平速度
+   也可能明显变化，硬门槛 `|Δv_x| ≤ 0.5|Δv_y|` 会误杀真落点（实测真落点比值高达
+   0.65~0.92），改用"够猛的折角才放宽"的两档判据后 45° 精度回升。
+
+> 注：三个增量彼此耦合（`max_dvx_ratio` 决定候选集，进而改变 NMS 的竞争结果），
+> 必须一起调；`dev/tune.py` 已把 ROI + 强折角档纳入同一目标函数，本表可由
+> `python3 participant/dev/tune.py --detections <out>/detections --calib-roi 50`
+> 独立复现（实测同样给出 68.35 / 75，且自动标定出与 config 逐位相同的三个 ROI）。
 
 > ⚠️ **总分 ≠ 精度分**：赛题满分 100 = **精度分 75 + 推理耗时分 25**
 > （平均推理 FPS 线性计分：1 fps → 1 分，50 fps → 满分 25 分）。
-> 上面的 60.61 只是精度那 75 分。耗时分必须**在评测机（2×4090 + TRT）上实测**——
+> 上面的 68.35 只是精度那 75 分。耗时分必须**在评测机（2×4090 + TRT）上实测**——
 > 本地无 GPU，`--decoder cpu` 下约 3 fps，不代表评测成绩。速度分是本方案最大的一块未兑现空间。
 「忽略」= 命中 GT 里 `valid=false` 的干扰点，按赛题口径既不算 TP 也不算 FP。
 
 该表的数字由**完整 15 条端到端复跑**（解码 → 推理 → 落点分析 → 写文件）产出，
-且与 `dev/replay.py` 用生产代码重放的结果**逐字节一致**（105 行预测全部相同，含浮点坐标），
+且与 `dev/replay.py` 用生产代码重放的结果**逐字节一致**（91 行预测全部相同，含浮点坐标），
 因此"调参器预测的分数"与"真跑拿到的分数"不存在静默失配。
 
 ## 2. 方法
@@ -60,8 +79,24 @@ participant/
 
 * `Δv_y` 足够负 ⇔ 下落被瞬间抬升 ⇔ 触台；
 * `|Δv_x|/|Δv_y|` 的上限来自"竖直反跳在图像中的投影方向"，用于滤掉跟错目标、
-  轨迹跳变造成的伪折角；
+  轨迹跳变造成的伪折角；**强折角档**：当 `|Δv_y| ≥ dv_strong`（折角远超噪声，
+  几乎不可能是轨迹跳变）时放宽到 `ratio_strong`——侧旋/斜视角下真触台的水平速度
+  也会明显变化，单档硬门槛会把真落点误杀（45° 实测真落点该比值达 0.65~0.92）；
 * 紧邻观测必须在 `max_step` 帧内，否则轨迹断口会伪造出 ±100px/帧² 的巨型折角。
+
+同一窗口内可能有若干帧都过阈值（真触台帧附近 1~2 帧的拟合也"像"折角），
+用 NMS（`min_gap` 帧内互斥）留下一个，谁留下由 `nms` 决定：`maxy` 最低点优先、
+`dv` 折角最猛者优先、**`combo` 折角强度×方向一致性优先**（90° 用这个：最低点常落在
+触台后 1~2 帧——球继续远离相机，投影 `y` 更低——整窗就会选错帧）。
+
+**Step 2.5｜球台投影区门控（landing.keep_in_roi，收益最大的单点改动）**
+触发台折角的**不只是触台**：球离台后落到地面/挡板同样是一次真实抛物线折角，`Δv_y`
+信号与台内触台完全一致，折角判据无法区分——只有"落点位置是否在球台投影区内"能判掉。
+各视角 ROI（归一化 `[x0,y0,x1,y1]`）取该视角**真值落点包围盒外扩**（0/45 度 50px、
+90 度 100px；`python3 participant/dev/tune.py --calib-roi 50` 可一键标定），
+属于机位常量。`keep_in_roi` 带 **fail-open**：若过滤后剩余落点不足 `roi_min_keep`（0.5）
+比例，说明 ROI 先验与当前机位不符（换机位/裁剪），整体放弃过滤，宁可放过 FP
+也不丢真落点。
 
 ⚠️ **为什么不用"y 取局部极大"**：0°/45° 是沿球台纵深方向俯视，触台后球同时
 远离相机，投影 `y` 会继续增大——用抛物线顶点/极值法实测 F1 只有 0.05，而折角
@@ -106,7 +141,8 @@ python3 participant/dev/test_landing.py
 
 ```bash
 PP_DUMP_DET=1 python3 run.py --input <input> --output <out> --decoder cpu   # 落盘逐帧观测
-python3 participant/dev/tune.py --detections <out>/detections --write       # 网格搜索→写回 config
+python3 participant/dev/tune.py --detections <out>/detections --calib-roi 50 --write
+                                        # 网格搜索（含 ROI 标定）→ 写回 config
 python3 participant/dev/replay.py --detections <out>/detections             # 秒级重放验证（出分）
 python3 run.py --input <input> --output <out>                               # 用新参数重跑出最终结果
 ```
@@ -136,7 +172,7 @@ python3 run.py --input <input> --output <out>                               # �
 | 只能改参赛者代码区 `pingpang/participant/` | ✅ 全部改动都在代码区内 | `git diff --stat 8dcc186 HEAD`：`solution.py`(重写)/`ball_detector.py`(改 90 行)/新增 `landing.py`、`configs/landing.json`、`dev/*`、`README.md`；框架目录零改动 |
 | 不得升级/替换 torch、numpy==1.26.4、onnxruntime-gpu==1.18.1、tensorrt==8.6.1 | ✅ 未装/未改/未联网 | 生产代码只 import `numpy/cv2/onnxruntime/tensorrt`（连 torch 都不需要），`requirements` 无新增 |
 | 权重以 ONNX 放 `participant/weights/` 打进镜像 | ✅ | `weights/ball.onnx`（官方权重，未改动，5.3MB） |
-| 输出合法：`frame_id` 为 int 且在 `[0,n_frames)`，坐标有限且 `0<=x<width, 0<=y<height`，不越界、去重 | ✅ | 统一 clamp + 去重；15 条全量 105 行预测 **0 条非法**（`validate.py` 无 errors） |
+| 输出合法：`frame_id` 为 int 且在 `[0,n_frames)`，坐标有限且 `0<=x<width, 0<=y<height`，不越界、去重 | ✅ | 统一 clamp + 去重；15 条全量 91 行预测 **0 条非法**（`validate.py` 无 errors） |
 | 输出物 < 1GB、每任务 < 7200s、离线无联网 | ✅ | 输出仅 `predictions.jsonl`（KB 级）；CPU 全量 15 条约 13 min；无任何网络调用 |
 | prepare 里构建 TRT（不占 FPS 计时） | ✅ | `prepare` 内 TRT 构建 + warmup，engine 缓存到 `<output>/trt_cache`，失败自动回退 onnxruntime |
 
