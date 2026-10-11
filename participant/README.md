@@ -12,7 +12,7 @@ participant/
 ├── base_solution.py       官方基类（未改动）
 ├── configs/landing.json   全部超参（检测阈值 + 按视角分档的落点参数）
 ├── weights/ball.onnx      官方提供的球检测权重（未改动）
-└── dev/                   离线开发工具（不参与评测，可在平台外运行）
+└── dev/                   离线开发工具（**不随提交物打包**，见第 5、6 节；含读真值的评分脚本）
     ├── eval_f1.py         按官方口径本地评分（±1 帧 / ≤50px / Kuhn 一对一匹配）
     ├── tune.py            用缓存的逐帧观测做网格搜索
     ├── replay.py          从缓存观测**重放生产代码**的落点链路（秒级出分）
@@ -30,6 +30,11 @@ participant/
 | 90° | 3 | 29 | 9 | 4 | 2 | 0.763 | 0.879 | **0.817** |
 
 **精度分 = 60.61 / 75**（官方基线 43.7 / 75），三视角 F1 均值 0.808 vs 基线总 F1 0.604。
+
+> ⚠️ **总分 ≠ 精度分**：赛题满分 100 = **精度分 75 + 推理耗时分 25**
+> （平均推理 FPS 线性计分：1 fps → 1 分，50 fps → 满分 25 分）。
+> 上面的 60.61 只是精度那 75 分。耗时分必须**在评测机（2×4090 + TRT）上实测**——
+> 本地无 GPU，`--decoder cpu` 下约 3 fps，不代表评测成绩。速度分是本方案最大的一块未兑现空间。
 「忽略」= 命中 GT 里 `valid=false` 的干扰点，按赛题口径既不算 TP 也不算 FP。
 
 该表的数字由**完整 15 条端到端复跑**（解码 → 推理 → 落点分析 → 写文件）产出，
@@ -122,3 +127,52 @@ python3 run.py --input <input> --output <out>                               # �
 * 所有观测在 `finish_video` 统一分析（框架允许延迟输出），因此落点判定不受
   "必须即时输出"的限制；单视频异常被 try/except 隔离，不会拖垮整场。
 * 输出前统一 clamp 到 `[0, width-1e-3]×[0, height-1e-3]`，杜绝越界非法行。
+
+## 5. 合规自检（对照赛题硬约束）
+
+| 硬约束（来自 `pppp/赛题详情.md` / `PROMPT.md`） | 本方案状态 | 证据 |
+|---|---|---|
+| 不得改框架：`core/*.py`、`run.py`、`validate.py`、`integrity.py`、`scripts/*.py`、`run.sh`、`.integrity.json` | ✅ **零改动** | 这 15 个文件与官方 `origin/main:participant/pingpang/*` **逐字节相同**；`python3 integrity.py --verify` → `完整性校验通过`（打包时各任务各跑一次） |
+| 只能改参赛者代码区 `pingpang/participant/` | ✅ 全部改动都在代码区内 | `git diff --stat 8dcc186 HEAD`：`solution.py`(重写)/`ball_detector.py`(改 90 行)/新增 `landing.py`、`configs/landing.json`、`dev/*`、`README.md`；框架目录零改动 |
+| 不得升级/替换 torch、numpy==1.26.4、onnxruntime-gpu==1.18.1、tensorrt==8.6.1 | ✅ 未装/未改/未联网 | 生产代码只 import `numpy/cv2/onnxruntime/tensorrt`（连 torch 都不需要），`requirements` 无新增 |
+| 权重以 ONNX 放 `participant/weights/` 打进镜像 | ✅ | `weights/ball.onnx`（官方权重，未改动，5.3MB） |
+| 输出合法：`frame_id` 为 int 且在 `[0,n_frames)`，坐标有限且 `0<=x<width, 0<=y<height`，不越界、去重 | ✅ | 统一 clamp + 去重；15 条全量 105 行预测 **0 条非法**（`validate.py` 无 errors） |
+| 输出物 < 1GB、每任务 < 7200s、离线无联网 | ✅ | 输出仅 `predictions.jsonl`（KB 级）；CPU 全量 15 条约 13 min；无任何网络调用 |
+| prepare 里构建 TRT（不占 FPS 计时） | ✅ | `prepare` 内 TRT 构建 + warmup，engine 缓存到 `<output>/trt_cache`，失败自动回退 onnxruntime |
+
+> ⚠️ 一处**评审观感**风险已处理：提交物里若留着 `participant/dev/`，等于"提交物内含读真值
+> （`gt_public.jsonl`）的代码"——官方 `tune_eval.py` 刻意放在工程根**之外**就是这个原因。
+> 因此工程根的 `pack_submit.sh` 打包时**自动剔除 `dev/`、`__pycache__`、`*.pyc`**。
+
+## 6. 如何提交（本机已具备条件）
+
+本机布局即提交布局：`~/dev/projects/participant/` 就是**工程根**（对应容器 `/participant`），
+内含 `run_all.sh` + `pingpang/` + `basketball/`（附加题保持官方参考实现不动，评测按参考实现计分）。
+
+```bash
+cd ~/dev/projects/participant
+bash pack_submit.sh                 # 组装干净提交树 + zip，并自动跑两任务的 integrity 校验
+# → submit/participant.zip  （解压得到 participant/ 工程根，316MB）
+# LEAN=1 bash pack_submit.sh        # 再剔掉验证集视频（镜像小三~300MB）
+# bash pack_submit.sh --docker      # 额外 docker build + docker save → submit/sport-vision-submit.tar
+```
+
+* **方式一（平台，推荐）**：`https://aigpu.migu.cn/home` 创建 **2 卡 4090** 实例，镜像必须选
+  `pytorch 2.1.2-ubuntu22.04-p3.10-cuda11.8`；上传 `submit/participant.zip` 解压到 `/participant`，
+  按官方命令装依赖 → 自测 → 按平台要求提交。
+* **方式二（本地 Docker）**：需先下载并 `docker load -i sport-base_v1.tar`（`sport-base:v1`，23.8GB，
+  **本机没有，须从比赛官网下载**），然后 `bash pack_submit.sh --docker`，把
+  `submit/sport-vision-submit.tar` 上传平台（入口已设为 `/participant/run_all.sh`）。
+* 提交前建议再跑一次与评测同形态的联合自测：
+
+```bash
+cd ~/dev/projects/participant && mkdir -p input
+ln -sfn $PWD/pingpang/public_data   input/pingpang
+ln -sfn $PWD/basketball/public_data input/basketball
+./run_all.sh input output     # 产物 output/{pingpang,basketball}/{predictions.jsonl,run_status.json,run.log}
+```
+
+* ⚠️ **每队最多 5 次提交机会，以最后一次成功提交计分**（运行失败不占次数）；每跑完一次自测就打 tag：
+  `git tag -a sub1 -m "第1次提交" && git push --tags`，保证能随时回到得分最高的版本。
+* 官方分支约定：开发用 `dev/pingpang-solution`（本仓库目前在个人分支 `toshi`）。
+
