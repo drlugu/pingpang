@@ -15,9 +15,21 @@ participant/
 └── dev/                   离线开发工具（不参与评测，可在平台外运行）
     ├── eval_f1.py         按官方口径本地评分（±1 帧 / ≤50px / Kuhn 一对一匹配）
     ├── tune.py            用缓存的逐帧观测做网格搜索
+    ├── replay.py          从缓存观测**重放生产代码**的落点链路（秒级出分）
     ├── calib_offset.py    标定"输出通道 ↔ 帧偏移"
     └── test_landing.py    落点算法冒烟测试（只需 numpy，含断口鲁棒性用例）
 ```
+
+## 1.5 实测结果（公开验证集 15 条，本地复刻官方口径）
+
+| 视角 | 视频 | TP | FP | FN | 忽略 | P | R | **F1** |
+|---|---|---|---|---|---|---|---|---|
+| 0° | 5 | 19 | 8 | 2 | 0 | 0.704 | 0.905 | **0.792** |
+| 45° | 7 | 31 | 7 | 7 | 0 | 0.816 | 0.816 | **0.816** |
+| 90° | 3 | 29 | 9 | 4 | 2 | 0.763 | 0.879 | **0.817** |
+
+**精度分 = 60.61 / 75**（官方基线 43.7 / 75），三视角 F1 均值 0.808 vs 基线总 F1 0.604。
+「忽略」= 命中 GT 里 `valid=false` 的干扰点，按赛题口径既不算 TP 也不算 FP。
 
 ## 2. 方法
 
@@ -70,8 +82,15 @@ python3 participant/dev/test_landing.py
 ```bash
 PP_DUMP_DET=1 python3 run.py --input <input> --output <out> --decoder cpu   # 落盘逐帧观测
 python3 participant/dev/tune.py --detections <out>/detections --write       # 网格搜索→写回 config
+python3 participant/dev/replay.py --detections <out>/detections             # 秒级重放验证（出分）
 python3 run.py --input <input> --output <out>                               # 用新参数重跑出最终结果
 ```
+
+`replay.py` 直接实例化 `Solution` 并调用其 `prepare`（加载真实配置）+ `_analyze`
+（真实算法），因此**测的就是生产代码**。落点分析是纯后处理（只吃逐帧观测），
+推理结果已被 dump 完整捕获，所以重放结果与真跑一遍推理逐字节一致——
+改一次参数验证只需几秒，不必重跑十几分钟推理。改完配置务必用 `replay.py`
+或整跑复核，避免"配置写了但代码没读到"这类静默失配。
 
 ## 4. 算力与工程取舍
 

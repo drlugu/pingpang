@@ -160,12 +160,14 @@ def find_landings(points: list[tuple[float, float, float, float]], cfg: dict
 
     * ``k``              每侧参与速度拟合的点数（默认 2）
     * ``span``           单侧最长回溯/前探帧距（默认 6）
+    * ``max_step``       紧邻前后观测的最大帧距（默认 2；轨迹断口会伪造巨折角）
     * ``dv_y``           Δv_y 阈值，越小越严（默认 -10.0）
     * ``max_dvx_ratio``  |Δv_x| / |Δv_y| 上限（默认 0.5）
     * ``min_gap``        两个落点之间的最小帧间隔（NMS，默认 6）
     * ``nms``            重叠候选保留谁：``maxy`` 取最低点 / ``dv`` 取折角最猛者
     """
-    cands = kink_candidates(points, int(cfg.get("k", 2)), float(cfg.get("span", 6)))
+    cands = kink_candidates(points, int(cfg.get("k", 2)), float(cfg.get("span", 6)),
+                            float(cfg.get("max_step", 2.0)))
     return pick_landings(cands, float(cfg.get("dv_y", -10.0)),
                          float(cfg.get("max_dvx_ratio", 0.5)),
                          float(cfg.get("min_gap", 6)),
