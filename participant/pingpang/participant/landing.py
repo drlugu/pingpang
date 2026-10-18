@@ -401,7 +401,9 @@ def _depart_slope(points: list[tuple[float, float, float, float]],
 
 def rally_filter(points: list[tuple[float, float, float, float]],
                  raw_landings: list[tuple[int, float, float, float]],
-                 roi=None, angle: str | None = None) -> list[tuple[int, float, float, float]]:
+                 roi=None, angle: str | None = None,
+                 db_max_frames: int = 8, db_max_dist: float = 200.0,
+                 db_max_depart: float = 20.0) -> list[tuple[int, float, float, float]]:
     """回合状态机：用轨迹 + 球台信息抑制干扰落点（不动 Δv_y 判据）。
 
     三类干扰（公开验证集实测，全部是真实强反弹但标注员不算）：
@@ -455,7 +457,8 @@ def rally_filter(points: list[tuple[float, float, float, float]],
         if prev is not None:
             pf, px, py = prev
             d = math.hypot(x - px, y - py)
-            if (f - pf) <= 8 and d < 200.0 and s is not None and abs(s) < 20.0:
+            if (f - pf) <= db_max_frames and d < db_max_dist \
+                    and s is not None and abs(s) < db_max_depart:
                 continue
         # 4) 90 度同侧连续
         if mid_x is not None and prev_side is not None:
@@ -499,7 +502,10 @@ def analyze_landings(points: list[tuple[float, float, float, float]],
                       min_keep=float(land_cfg.get("roi_min_keep", 0.5)))
 
     # 回合状态机：抑制回合后弹跳 / 桌边反弹 / 二次弹跳 / 90度同侧连续。
-    raw = rally_filter(points, raw, rois, angle=angle)
+    raw = rally_filter(points, raw, rois, angle=angle,
+                       db_max_frames=int(land_cfg.get("db_max_frames", 8)),
+                       db_max_dist=float(land_cfg.get("db_max_dist", 200.0)),
+                       db_max_depart=float(land_cfg.get("db_max_depart", 20.0)))
 
     out: list[tuple[int, float, float]] = []
     for fid, x, y, _score in raw:
