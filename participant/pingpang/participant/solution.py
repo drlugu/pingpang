@@ -284,8 +284,10 @@ class Solution(BaseSolution):
         self.det.detect(np.zeros((IN_H, IN_W, 3), np.uint8), IN_W, IN_H)
         # 预热后把整帧（H2D+kernel+D2H）捕获成 CUDA Graph：回放 0.14ms vs 逐帧入队 1.8ms
         cap = getattr(infer_fn, "capture", None)
-        if callable(cap):
+        if callable(cap) and os.environ.get("PP_SKIP_CAPTURE", "0") != "1":
             context.info["cuda_graph"] = bool(cap())
+        else:
+            context.info["cuda_graph"] = False
 
         context.info["backend"] = backend
         context.info["channels"] = list(self.det.channels)
