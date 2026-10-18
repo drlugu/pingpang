@@ -138,6 +138,48 @@ def _clean_track_side(points: list[tuple[float, float, float, float]],
     return pts
 
 
+def _edge_candidates(points: list[tuple[float, float, float, float]], cfg: dict
+                     ) -> list[tuple[int, float, float, float]]:
+    """起始边缘候选：视频开头缺少「反弹前」一侧观测，速度折角无法成立时，
+    用「反弹后抬升」的一致运动证据补一个候选。
+
+    只在确实缺少观测的轨迹边界启用（保守）。返回与 ``pick_landings`` 相同格式的
+    ``[(frame_id, x, y, score), ...]``；score 用「运动强度 × 置信度」近似折角强度。
+
+    判据：开头若干帧 y 单调下降（球在抬升）、总抬升量超过阈值、首帧置信度足够，
+    推断开头那一帧就是触台帧（球刚离台）。随后仍要过 ROI 与回合状态机。
+    """
+    out: list[tuple[int, float, float, float]] = []
+    n = len(points)
+    if n < 4:
+        return out
+
+    ec = cfg.get("edge", {}) or {}
+    start_min_rise = float(ec.get("start_min_rise", 12.0))   # 开头总抬升量(px)
+    start_vy_max = float(ec.get("start_vy_max", -3.0))       # 开头平均 y 速度上限
+    start_conf = float(ec.get("start_conf", 0.7))
+    start_max_frame = int(ec.get("start_max_frame", 4))      # 首帧必须 <= 该帧号
+
+    # 起始边缘
+    if int(points[0][0]) > start_max_frame:
+        return out
+    head = points[:4]
+    F = [p[0] for p in head]
+    Y = [p[2] for p in head]
+    X = [p[1] for p in head]
+    C = [p[3] for p in head]
+    df = F[-1] - F[0]
+    if df <= 0:
+        return out
+    vy = (Y[-1] - Y[0]) / df
+    rise = Y[0] - Y[-1]
+    mono = all(Y[i + 1] <= Y[i] + 2.0 for i in range(len(Y) - 1))
+    if mono and vy <= start_vy_max and rise >= start_min_rise \
+            and C[0] >= start_conf:
+        out.append((int(F[0]), X[0], Y[0], (-vy) * C[0]))
+    return out
+
+
 def _line_slope(F: np.ndarray, V: np.ndarray, idx: np.ndarray, f0: float) -> float:
     """对 ``idx`` 选中的点拟合 ``V = p·(F - f0) + q``，返回斜率 p。"""
     t = F[idx] - f0
@@ -317,14 +359,28 @@ def find_landings(points: list[tuple[float, float, float, float]], cfg: dict
         v = cfg.get(name, None)
         return None if v is None else float(v)
 
-    return pick_landings(cands, float(cfg.get("dv_y", -10.0)),
-                         float(cfg.get("max_dvx_ratio", 0.5)),
-                         float(cfg.get("min_gap", 6)),
-                         str(cfg.get("nms", "maxy")),
-                         float(cfg.get("dv_strong", 0.0)),
-                         float(cfg.get("ratio_strong", 0.0)),
-                         _opt("vb_min"), _opt("va_max"), _opt("dt_max"),
-                         _opt("conf_min"))
+    picked = pick_landings(cands, float(cfg.get("dv_y", -10.0)),
+                           float(cfg.get("max_dvx_ratio", 0.5)),
+                           float(cfg.get("min_gap", 6)),
+                           str(cfg.get("nms", "maxy")),
+                           float(cfg.get("dv_strong", 0.0)),
+                           float(cfg.get("ratio_strong", 0.0)),
+                           _opt("vb_min"), _opt("va_max"), _opt("dt_max"),
+                           _opt("conf_min"))
+
+    # 起始边缘候选（缺「反弹前」观测）：补一个候选，再与常规候选统一 min_gap NMS。
+    if cfg.get("edge", None) is not None:
+        picked += _edge_candidates(points, cfg)
+        min_gap = float(cfg.get("min_gap", 6))
+        picked.sort(key=lambda t: (-t[3], t[0]))  # 分数高者优先
+        merged: list[tuple[int, float, float, float]] = []
+        for p in picked:
+            if all(abs(p[0] - q[0]) >= min_gap for q in merged):
+                merged.append(p)
+        picked = merged
+
+    picked.sort(key=lambda t: t[0])
+    return picked
 
 
 def _depart_slope(points: list[tuple[float, float, float, float]],
@@ -411,3 +467,45 @@ def rally_filter(points: list[tuple[float, float, float, float]],
         if mid_x is not None:
             prev_side = "L" if x < mid_x else "R"
     return kept
+
+
+def analyze_landings(points: list[tuple[float, float, float, float]],
+                     angle: str, width: float, height: float, n_frames: int,
+                     conf_gate: float, land_cfg: dict
+                     ) -> list[tuple[int, float, float]]:
+    """完整落点判定管线（检测观测融合之后）：唯一的判定实现。
+
+    ``points`` 必须是已按帧融合并升序排序的 ``[(f, x, y, conf), ...]``；
+    ``land_cfg`` 是**已合并** default + 视角 的配置 dict。返回
+    ``[(frame_id, x, y), ...]``（frame_id 为 int，x/y 已 clamp 到合法半开区间）。
+
+    这是 ``solution._analyze`` 与离线工具 ``tune_eval.py`` 共同调用的唯一判定入口，
+    避免两处拷贝漂移（历史上曾因此导致离线评分与线上行为脱节）。
+    """
+    gated = [p for p in points if p[3] >= conf_gate]
+    if len(gated) >= 3:
+        points = gated
+
+    points = clean_track(points,
+                         max_resid=float(land_cfg.get("max_resid", 30.0)),
+                         max_gap=int(land_cfg.get("max_gap", 6)),
+                         mode=str(land_cfg.get("clean_mode", "chord")))
+
+    raw = find_landings(points, land_cfg)
+
+    # 球台投影区门控：触台只可能发生在台面上。
+    rois = table_roi(land_cfg.get("roi"), width, height)
+    raw = keep_in_roi(raw, rois,
+                      min_keep=float(land_cfg.get("roi_min_keep", 0.5)))
+
+    # 回合状态机：抑制回合后弹跳 / 桌边反弹 / 二次弹跳 / 90度同侧连续。
+    raw = rally_filter(points, raw, rois, angle=angle)
+
+    out: list[tuple[int, float, float]] = []
+    for fid, x, y, _score in raw:
+        if not (0 <= fid < n_frames):
+            continue
+        cx = min(max(float(x), 0.0), width - 1e-3)
+        cy = min(max(float(y), 0.0), height - 1e-3)
+        out.append((fid, cx, cy))
+    return out

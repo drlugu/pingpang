@@ -29,8 +29,7 @@ from core.types import Landing, RunContext, VideoMeta
 
 from .ball_detector import IN_H, IN_W, BallDetector
 from .base_solution import BaseSolution
-from .landing import (clean_track, find_landings, fuse_obs, keep_in_roi,
-                      rally_filter, table_roi)
+from .landing import analyze_landings, fuse_obs
 
 _HERE = Path(__file__).resolve().parent
 
@@ -344,39 +343,15 @@ class Solution(BaseSolution):
 
         det_cfg = self.cfg["detector"]
         conf_gate = float(det_cfg.get("conf_gate", 0.6))
-        gated = [p for p in points if p[3] >= conf_gate]
-        if len(gated) >= 3:
-            points = gated
 
         land_cfg = self.cfg["landing"]
         cfg = _deep_merge(land_cfg.get("default", {}),
                           land_cfg.get(self.angle, {}))
-        points = clean_track(points,
-                             max_resid=float(cfg.get("max_resid", 30.0)),
-                             max_gap=int(cfg.get("max_gap", 6)),
-                             mode=str(cfg.get("clean_mode", "chord")))
 
-        raw = find_landings(points, cfg)
+        raw = analyze_landings(points, self.angle, self.width, self.height,
+                               self.n_frames, conf_gate, cfg)
 
-        # 球台投影区门控：触台只可能发生在台面上。台外的"折角"是球已离台后在地面/
-        # 挡板上的真实反弹，Δv_y 信号与台内触台完全一致，只能靠落点位置判掉。
-        # ROI 是归一化机位常量（见 landing.table_roi / keep_in_roi 的 fail-open）。
-        rois = table_roi(cfg.get("roi"), self.width, self.height)
-        raw = keep_in_roi(raw, rois,
-                          min_keep=float(cfg.get("roi_min_keep", 0.5)))
-
-        # 回合状态机（drlugu 24c2fce）：抑制回合后弹跳/桌边反弹/二次弹跳/90度同侧连续。
-        raw = rally_filter(points, raw, rois, angle=self.angle)
-
-        out: list[Landing] = []
-        for fid, x, y, _score in raw:
-            if not (0 <= fid < self.n_frames):
-                continue
-            # 框架不会自动 clip，越界直接判非法 → 自己夹紧到合法半开区间
-            cx = min(max(float(x), 0.0), self.width - 1e-3)
-            cy = min(max(float(y), 0.0), self.height - 1e-3)
-            out.append(Landing(frame_id=fid, x=cx, y=cy))
-        return out
+        return [Landing(frame_id=f, x=x, y=y) for f, x, y in raw]
 
     def _dump(self, points, landings) -> None:
         try:
