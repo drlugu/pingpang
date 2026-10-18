@@ -101,12 +101,52 @@ def test_rally_filter():
     check("二次弹跳抑制后者", len(out3) == 1 and out3[0][0] == 2, str(out3))
 
 
+def test_observation_quality():
+    print("== observation quality ==")
+    # x 单点野值：chord 模式删除（x 跳变，conf<0.9）
+    pts = [(0, 0.0, 100.0, 0.95), (1, 10.0, 100.0, 0.9), (2, 80.0, 100.0, 0.8),
+           (3, 30.0, 100.0, 0.95), (4, 40.0, 100.0, 0.95)]
+    out = clean_track(pts, max_resid=15.0, max_gap=6, rounds=2, mode="chord")
+    check("x 单点野值删除", 2 not in [p[0] for p in out], str([p[0] for p in out]))
+
+    # 连续野值：两个连续 x 跳变点，两轮迭代应都删掉
+    pts2 = [(0, 0.0, 100.0, 0.95), (1, 10.0, 100.0, 0.9), (2, 80.0, 100.0, 0.8),
+            (3, 90.0, 100.0, 0.8), (4, 40.0, 100.0, 0.95), (5, 50.0, 100.0, 0.95)]
+    out2 = clean_track(pts2, max_resid=15.0, max_gap=6, rounds=2, mode="chord")
+    kept2 = [p[0] for p in out2]
+    check("连续野值删除", 2 not in kept2 and 3 not in kept2, str(kept2))
+
+    # 快速加速点：残差略大于阈值但仍在单调轨迹上 —— 已知限制：当前 side 模式会误删
+    # （v000094 f42 正是此例，残差 23>20 被删导致断口）。这里只记录当前行为。
+    pts3 = [(0, 0.0, 100.0, 0.95), (1, 10.0, 108.0, 0.9), (2, 22.0, 116.0, 0.85),
+            (3, 36.0, 120.0, 0.9), (4, 52.0, 116.0, 0.9)]
+    out3 = clean_track(pts3, max_resid=6.0, max_gap=6, rounds=2, mode="side")
+    kept3 = [p[0] for p in out3]
+    check("side 模式保留折角顶点(f=3)", 3 in kept3, str(kept3))
+
+
+def test_deceleration_known_limitation():
+    print("== deceleration 已知限制 ==")
+    # 下降→趋平（减速）当前会被折角判据误判为反弹：
+    #   v前>0（下降）→ v后≈0（趋平），Δv_y<0 但球并未真正触台上升。
+    # 已知限制（阶段 2 需用运动模型区分），当前代码产生候选，故这里断言"产生候选"
+    # 以固化现状，避免后续无意识地改变行为。
+    pts = [(0, 0.0, 100.0, 0.9), (1, 0.0, 114.0, 0.9), (2, 0.0, 130.0, 0.9),
+           (3, 0.0, 147.0, 0.9), (4, 0.0, 148.0, 0.9)]
+    c = kink_candidates(pts, k=2, span=4.0, max_step=2.0)
+    # 该减速在 f=2~3 处产生 Δv_y<0 的候选
+    has_decel_cand = any(x[3] < 0 for x in c)
+    check("减速趋平当前会产生候选（已知限制）", has_decel_cand, str(c))
+
+
 def main():
     test_fuse_obs()
     test_clean_track()
     test_kink_candidates()
     test_pick_landings()
     test_rally_filter()
+    test_observation_quality()
+    test_deceleration_known_limitation()
     print(f"\n全部通过（{PASS} 个断言）")
 
 
